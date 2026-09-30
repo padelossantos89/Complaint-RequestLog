@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  :root{
+:root{
     --paper:#FFF6DE; --panel:#FFFFFF; --ink:#12202E; --ink-soft:#4C5A67; --line:#DCD6C7;
     --amber:#FBC94C; --amber-deep:#D9900F; --amber-tint:#FFEEB8;
     --red:#B7473D; --red-tint:#F6DEDB; --green:#4C7A5E; --green-tint:#DCEBE1;
@@ -256,6 +256,7 @@
         </select>
         <label class="dl-lbl">From <input type="date" id="ov-from"></label>
         <label class="dl-lbl">To <input type="date" id="ov-to"></label>
+        <button class="btn dark" id="ov-search-btn" type="button">🔍 Search</button>
       </div>
       <div id="ov-date-error" style="display:none; margin:-10px 0 16px; padding:8px 12px; border-radius:8px; background:var(--red-tint); border:1px solid var(--red); color:var(--red); font-size:13px; font-weight:600;"></div>
 
@@ -270,11 +271,12 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-/* =========================================================================
-   CONFIGURATION
-   ========================================================================= */
-const AUTH_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzvHtNnOM6VId1meq7DL8AB13FnvNa0MVedyJykA9M1--Xi9BCujPjMoXeO6Jq6800rBg/exec"; // must match login.html's AUTH_SCRIPT_URL
+/* Supabase config — same project as login.html / log.html */
+const SUPABASE_URL = "https://tjmhwetxfglnvavspfsv.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRqbWh3ZXR4ZmdsbnZhdnNwZnN2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA2NTkzNjgsImV4cCI6MjEwNjIzNTM2OH0.yFpHgASO_0LXNQ5HjYIkBiPmFPgHUODsOs4E1B42FsA";
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const f = id => document.getElementById(id);
 
@@ -287,11 +289,12 @@ if(session) f('admin-username').textContent = session.username;
 document.getElementById('logout-link').addEventListener('click', async (e)=>{
   e.preventDefault();
   await logActivity(session.username, session.role, 'Logged out', '');
-  localStorage.removeItem('ileco3_session');
+  try{ Object.keys(localStorage).filter(k=>k.indexOf('ileco_rows_v1:')===0).forEach(k=>localStorage.removeItem(k)); }catch(e){}
+      localStorage.removeItem('ileco3_session');
   location.href = 'login.html';
 });
 
-function isLive(){ return !!AUTH_SCRIPT_URL; }
+function isLive(){ return true; }
 
 async function sha256Hex(str){
   const enc = new TextEncoder().encode(str);
@@ -300,91 +303,50 @@ async function sha256Hex(str){
 }
 
 async function logActivity(username, role, action, details){
-  if(isLive()){
-    try{
-      await fetch(AUTH_SCRIPT_URL, {
-        method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
-        body: JSON.stringify({ mode:'logActivity', username, role, action, details })
-      });
-    }catch(err){ /* best-effort */ }
-  } else {
-    const log = JSON.parse(localStorage.getItem('ileco3_activity') || '[]');
-    log.unshift({ timestamp:new Date().toISOString(), username, role, action, details: details||'' });
-    localStorage.setItem('ileco3_activity', JSON.stringify(log.slice(0,500)));
-  }
+  try{ await db.from('activity_log').insert({ username, role, action, details: details||'' }); }
+  catch(err){ /* best-effort */ }
 }
 
 /* ---------- users: list / create / update / delete ---------- */
 async function listUsers(){
-  if(isLive()){
-    const url = `${AUTH_SCRIPT_URL}?mode=listUsers&adminUsername=${encodeURIComponent(session.username)}`;
-    const res = await fetch(url);
-    const data = await res.json();
-    if(!data.ok) throw new Error(data.error || 'Could not load users.');
-    return data.users;
-  }
-  return JSON.parse(localStorage.getItem('ileco3_users') || '[]');
+  const { data, error } = await db.from('app_users').select('username, role, must_change_password, created_at').order('created_at');
+  if(error) throw new Error(error.message);
+  return data.map(u => ({ username:u.username, role:u.role, mustChangePassword: !!u.must_change_password, createdAt: u.created_at }));
 }
 
 async function createUser(username, passwordHash, role){
-  if(isLive()){
-    const res = await fetch(AUTH_SCRIPT_URL, {
-      method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body: JSON.stringify({ mode:'createUser', adminUsername: session.username, username, passwordHash, role })
-    });
-    return await res.json();
-  }
-  const users = JSON.parse(localStorage.getItem('ileco3_users') || '[]');
-  if(users.some(u=>u.username.toLowerCase()===username.toLowerCase())){
-    return { ok:false, error:'That username already exists.' };
-  }
-  users.push({ username, passwordHash, role, mustChangePassword:true, createdAt:new Date().toISOString() });
-  localStorage.setItem('ileco3_users', JSON.stringify(users));
+  const { error } = await db.from('app_users').insert({ username, password_hash: passwordHash, role, must_change_password:true });
+  if(error) return { ok:false, error: error.message.indexOf('duplicate')!==-1 ? 'That username already exists.' : error.message };
   await logActivity(session.username, 'admin', 'Created user', username);
   return { ok:true };
 }
 
 async function updateUser(username, opts){
-  if(isLive()){
-    const res = await fetch(AUTH_SCRIPT_URL, {
-      method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body: JSON.stringify({ mode:'updateUser', adminUsername: session.username, username, ...opts })
-    });
-    return await res.json();
-  }
-  const users = JSON.parse(localStorage.getItem('ileco3_users') || '[]');
-  const idx = users.findIndex(u=>u.username.toLowerCase()===username.toLowerCase());
-  if(idx===-1) return { ok:false, error:'User not found.' };
-  if(opts.newPasswordHash){ users[idx].passwordHash = opts.newPasswordHash; users[idx].mustChangePassword = true; }
   if(opts.newRole){
-    const adminCount = users.filter(u=>u.role==='admin').length;
-    if(users[idx].role==='admin' && opts.newRole!=='admin' && adminCount<=1){
-      return { ok:false, error:'Cannot change the role of the last remaining admin account.' };
+    const { data: target } = await db.from('app_users').select('role').ilike('username', username).maybeSingle();
+    if(target && target.role==='admin' && opts.newRole!=='admin'){
+      const { count } = await db.from('app_users').select('username', { count:'exact', head:true }).eq('role','admin');
+      if((count||0) <= 1) return { ok:false, error:'Cannot change the role of the last remaining admin account.' };
     }
-    users[idx].role = opts.newRole;
   }
-  localStorage.setItem('ileco3_users', JSON.stringify(users));
+  const patch = {};
+  if(opts.newPasswordHash){ patch.password_hash = opts.newPasswordHash; patch.must_change_password = true; }
+  if(opts.newRole){ patch.role = opts.newRole; }
+  const { error } = await db.from('app_users').update(patch).ilike('username', username);
+  if(error) return { ok:false, error: error.message };
   await logActivity(session.username, 'admin', 'Modified user', username);
   return { ok:true };
 }
 
 async function deleteUser(username){
-  if(isLive()){
-    const res = await fetch(AUTH_SCRIPT_URL, {
-      method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body: JSON.stringify({ mode:'deleteUser', adminUsername: session.username, username })
-    });
-    return await res.json();
-  }
-  let users = JSON.parse(localStorage.getItem('ileco3_users') || '[]');
-  const target = users.find(u=>u.username.toLowerCase()===username.toLowerCase());
+  const { data: target } = await db.from('app_users').select('role').ilike('username', username).maybeSingle();
   if(!target) return { ok:false, error:'User not found.' };
-  const adminCount = users.filter(u=>u.role==='admin').length;
-  if(target.role==='admin' && adminCount<=1){
-    return { ok:false, error:'Cannot delete the last remaining admin account.' };
+  if(target.role==='admin'){
+    const { count } = await db.from('app_users').select('username', { count:'exact', head:true }).eq('role','admin');
+    if((count||0) <= 1) return { ok:false, error:'Cannot delete the last remaining admin account.' };
   }
-  users = users.filter(u=>u.username.toLowerCase()!==username.toLowerCase());
-  localStorage.setItem('ileco3_users', JSON.stringify(users));
+  const { error } = await db.from('app_users').delete().ilike('username', username);
+  if(error) return { ok:false, error: error.message };
   await logActivity(session.username, 'admin', 'Deleted user', username);
   return { ok:true };
 }
@@ -398,7 +360,7 @@ function fmtDate(v){
 async function renderUsers(){
   f('conn-banner').innerHTML = isLive()
     ? ''
-    : `<div class="conn">Demo mode — users are stored in this browser only. Paste your deployed AuthCode.gs URL into AUTH_SCRIPT_URL in login.html, change-password.html and admin.html to make this real.</div>`;
+    : '';
   const body = f('users-body');
   try{
     const users = await listUsers();
@@ -493,14 +455,9 @@ document.getElementById('create-user-form').addEventListener('submit', async (e)
 
 /* ---------- activity log ---------- */
 async function listActivity(){
-  if(isLive()){
-    const url = `${AUTH_SCRIPT_URL}?mode=listActivity&adminUsername=${encodeURIComponent(session.username)}`;
-    const res = await fetch(url);
-    const data = await res.json();
-    if(!data.ok) throw new Error(data.error || 'Could not load activity.');
-    return data.activity;
-  }
-  return JSON.parse(localStorage.getItem('ileco3_activity') || '[]');
+  const { data, error } = await db.from('activity_log').select('*').order('created_at', { ascending:false }).limit(1000);
+  if(error) throw new Error(error.message);
+  return data.map(a => ({ timestamp:a.created_at, username:a.username, role:a.role, action:a.action, details:a.details }));
 }
 
 let activityCache = [];
@@ -560,11 +517,52 @@ document.getElementById('refresh-activity-btn').addEventListener('click', render
 
 /* ---------- overall records (all four offices) ---------- */
 const OFFICES = [
-  { key:'pani-an',   name:'Pani-an Branch Office',   url:"https://script.google.com/macros/s/AKfycbzh84XZX4Py05KV_XcdTDLMuDieyqsNfde_4mflNicYl-tfeuG-zMj0gPVXiefbftfs/exec" },
-  { key:'sara',      name:'Sara Branch Office',      url:"https://script.google.com/macros/s/AKfycbwQ9gha3gXy0IaQCadbdi0po-CKHVPQaobbo93BnHfekBhbiX9ZyCOIJozjYAWBH4zoKQ/exec" },
-  { key:'natividad', name:'Natividad Branch Office', url:"https://script.google.com/macros/s/AKfycbzroAvJjFecBY6hrL60XViQtJ0l3X1ZNBVspYz_7ju-9gM4XBdwlYXwUaBijJBkiJ_s/exec" },
-  { key:'main',      name:'ILECO-III Main Office',   url:"https://script.google.com/macros/s/AKfycby5BcgIOJW0QTrXvX5-uxERwjONvJm2Kv1KgBnt6_cxZgtmzLO_1Wn186yq0doOUe2-/exec" }
+  { key:'pani-an',   name:'Pani-an Branch Office' },
+  { key:'sara',      name:'Sara Branch Office' },
+  { key:'natividad', name:'Natividad Branch Office' },
+  { key:'main',      name:'ILECO-III Main Office' }
 ];
+
+const HEADER_TO_COL_ = {
+  "Date Received":"date_received", "Time Received":"time_received", "Received By":"received_by",
+  "Name of Complainant":"name_of_complainant", "Contact Number":"contact_number",
+  "Sitio/Barangay":"sitio_barangay", "Town":"town", "Type of Complaint":"type_of_complaint",
+  "Description of Complaint":"description", "Account Name":"account_name", "Account Number":"account_number",
+  "Meter Number":"meter_number", "Serial Number":"serial_number", "Pole Number":"pole_number",
+  "Acted By":"acted_by", "Action Taken":"action_taken", "Date Acted":"date_acted",
+  "Place of Origin":"place_of_origin", "Departure Time":"departure_time",
+  "Place of Arrival":"place_of_arrival", "Arrival Time":"arrival_time", "Time Finished":"time_finished",
+  "Travel Time (min)":"travel_time_min", "Work Duration (min)":"work_duration_min",
+  "Travel Time + Work Duration":"travel_plus_work_min", "Duration (min)":"duration_min",
+  "Duration Less Travel Time (min)":"duration_less_travel"
+};
+const COL_TO_HEADER_ = Object.fromEntries(Object.entries(HEADER_TO_COL_).map(([h,c])=>[c,h]));
+function pgDateToUs_(s){
+  if(!s) return '';
+  const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if(!m) return s;
+  return `${+m[2]}/${+m[3]}/${m[1]}`;
+}
+function pgTimeToUs_(s){
+  if(!s) return '';
+  const m = String(s).match(/^(\d{1,2}):(\d{2})/);
+  if(!m) return s;
+  let h = +m[1]; const p = h>=12 ? 'PM' : 'AM'; h = h%12; if(h===0) h=12;
+  return `${h}:${m[2]} ${p}`;
+}
+const DATE_COLS_ = new Set(['date_received','date_acted']);
+const TIME_COLS_ = new Set(['time_received','departure_time','arrival_time','time_finished']);
+function rowFromDb_(dbRow, idx){
+  const out = { "No": idx+1, "Control Number": dbRow.control_number };
+  Object.entries(COL_TO_HEADER_).forEach(([col, header])=>{
+    let v = dbRow[col];
+    if(v === null || v === undefined) v = '';
+    if(DATE_COLS_.has(col)) v = pgDateToUs_(v);
+    else if(TIME_COLS_.has(col)) v = pgTimeToUs_(v);
+    out[header] = v;
+  });
+  return out;
+}
 let overallRecords = [];
 let overallFailed = [];
 
@@ -623,6 +621,25 @@ function normDate_(v){
   return s;
 }
 
+/* ---------- Instant-load cache: show the last saved records at once, refresh in the background ---------- */
+const ROWS_CACHE_PREFIX_ = 'ileco_rows_v1:';
+function rowsCacheSet_(key, rows){
+  try{
+    const headers = [], seen = {};
+    rows.forEach(r=>Object.keys(r).forEach(k=>{ if(!seen[k]){ seen[k]=1; headers.push(k); } }));
+    const data = rows.map(r=>headers.map(h=> r[h]===undefined ? '' : r[h]));
+    localStorage.setItem(ROWS_CACHE_PREFIX_+key, JSON.stringify({ t:Date.now(), h:headers, d:data }));
+  }catch(e){ /* storage full or blocked - the cache is optional */ }
+}
+function rowsCacheGet_(key){
+  try{
+    const s = localStorage.getItem(ROWS_CACHE_PREFIX_+key);
+    if(!s) return null;
+    const o = JSON.parse(s);
+    return o.d.map(a=>{ const r = {}; o.h.forEach((h,i)=>{ r[h] = a[i]; }); return r; });
+  }catch(e){ return null; }
+}
+
 function _dtMs(dateStr, timeStr){
   if(!dateStr || !timeStr) return null;
   const s = String(dateStr).trim(), t = String(timeStr).trim();
@@ -677,13 +694,32 @@ function showBox(id, msg){
 }
 
 async function fetchOffice(o){
-  const res = await fetch(o.url);
-  const data = await res.json();
-  return applyDurations((data.rows || []).map(r => Object.assign({}, r, { _office: o.name })));
+  const { data, error } = await db.from('complaints').select('*').eq('office', o.name).order('id', { ascending: true });
+  if(error) throw new Error(error.message);
+  const fresh = applyDurations(data.map((r,i) => Object.assign(rowFromDb_(r,i), { _office: o.name })));
+  rowsCacheSet_('office:' + o.name, fresh);
+  return fresh;
 }
+function populateOverallFilters_(){
+  const uniq = k => [...new Set(overallRecords.map(r=>r[k]).filter(Boolean))].sort();
+  f('ov-office').innerHTML = '<option value="">All offices</option>' + OFFICES.map(o=>`<option>${esc(o.name)}</option>`).join('');
+  f('ov-town').innerHTML   = '<option value="">All towns</option>' + uniq('Town').map(t=>`<option>${esc(t)}</option>`).join('');
+  f('ov-type').innerHTML   = '<option value="">All types</option>' + uniq('Type of Complaint').map(t=>`<option>${esc(t)}</option>`).join('');
+}
+let overallSearched = false;
 async function loadOverall(){
   const banner = f('ov-banner');
-  banner.innerHTML = '<div class="conn">Loading records from all four offices…</div>';
+  let shownCached = false;
+  if(overallRecords.length===0){
+    const parts = OFFICES.map(o=>rowsCacheGet_('office:' + o.name));
+    if(parts.every(Boolean)){            // show the last saved records from all four offices at once
+      overallRecords = parts.flatMap(p=>applyDurations(p));
+      overallFailed = [];
+      populateOverallFilters_(); renderOverall(); shownCached = true;
+      banner.innerHTML = '<div class="conn">Showing saved records - updating from the offices…</div>';
+    }
+  }
+  if(!shownCached) banner.innerHTML = '<div class="conn">Loading records from all four offices…</div>';
   const results = await Promise.allSettled(OFFICES.map(fetchOffice));
   overallRecords = [];
   const failed = [];
@@ -695,14 +731,19 @@ async function loadOverall(){
   banner.innerHTML = failed.length
     ? `<div class="conn">Couldn't load: ${esc(failed.join(', '))}. The records shown are incomplete — try Refresh.</div>`
     : '';
-  const uniq = k => [...new Set(overallRecords.map(r=>r[k]).filter(Boolean))].sort();
-  f('ov-office').innerHTML = '<option value="">All offices</option>' + OFFICES.map(o=>`<option>${esc(o.name)}</option>`).join('');
-  f('ov-town').innerHTML   = '<option value="">All towns</option>' + uniq('Town').map(t=>`<option>${esc(t)}</option>`).join('');
-  f('ov-type').innerHTML   = '<option value="">All types</option>' + uniq('Type of Complaint').map(t=>`<option>${esc(t)}</option>`).join('');
+  overallSearched = true;
+  populateOverallFilters_();
   renderOverall();
 }
 
 function renderOverall(){
+  const body = f('overall-body');
+  const ncols = document.querySelectorAll('#overall-table thead th').length;
+  if(!overallSearched){
+    f('ov-stat-row').innerHTML = '';
+    body.innerHTML = `<tr><td colspan="${ncols}"><div class="empty">Enter a search term or choose filters above, then click 🔍 Search.</div></td></tr>`;
+    return;
+  }
   const q = f('ov-search').value.trim().toLowerCase();
   const status = f('ov-status').value, office = f('ov-office').value, town = f('ov-town').value, type = f('ov-type').value;
   const from = f('ov-from').value, to = f('ov-to').value;
@@ -730,8 +771,6 @@ function renderOverall(){
     <div class="stat"><div class="num">${sum('Duration (min)')}</div><div class="lbl">Total duration (min)</div></div>
     <div class="stat"><div class="num">${sum('Duration Less Travel Time (min)')}</div><div class="lbl">Total duration less travel (min)</div></div>`;
 
-  const body = f('overall-body');
-  const ncols = document.querySelectorAll('#overall-table thead th').length;
   if(rows.length===0){
     body.innerHTML = `<tr><td colspan="${ncols}"><div class="empty">No records match. Try clearing the search or filters.</div></td></tr>`;
     return;
@@ -750,8 +789,14 @@ function renderOverall(){
     </tr>`).join('');
 }
 
-['ov-search'].forEach(id=>f(id).addEventListener('input', renderOverall));
-['ov-office','ov-town','ov-type','ov-status','ov-from','ov-to'].forEach(id=>f(id).addEventListener('change', renderOverall));
+function runOverallSearch_(){
+  if(!overallSearched){ loadOverall(); }   // first search: fetch from the 4 offices
+  else { renderOverall(); }                // already loaded: just re-filter, no extra data usage
+}
+['ov-search'].forEach(id=>f(id).addEventListener('input', ()=>{ if(overallSearched) renderOverall(); }));
+f('ov-search').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); runOverallSearch_(); } });
+['ov-office','ov-town','ov-type','ov-status','ov-from','ov-to'].forEach(id=>f(id).addEventListener('change', ()=>{ if(overallSearched) renderOverall(); }));
+f('ov-search-btn').addEventListener('click', runOverallSearch_);
 f('ov-refresh-btn').addEventListener('click', loadOverall);
 
 /* ---------- Excel export for Overall Records: same workbook layout as log.html ---------- */
@@ -1299,7 +1344,7 @@ document.querySelectorAll('.nav-btn').forEach(btn=>{
     btn.classList.add('active');
     document.getElementById('view-'+btn.dataset.view).classList.add('active');
     if(btn.dataset.view==='activity') renderActivity();
-    if(btn.dataset.view==='overall') loadOverall();
+    if(btn.dataset.view==='overall') renderOverall();   // shows the search prompt; no fetch until the admin searches
   });
 });
 
